@@ -1,110 +1,131 @@
 import asyncio
 import os
-from dotenv import load_dotenv
+import json
 import streamlit as st
 import pandas as pd
 import pydantic
+import litellm
+from dotenv import load_dotenv
 
 load_dotenv()
-
-from agents import Agent, Runner, function_tool
-
-MODEL_NAME = "gemini/gemini-1.5-pro"
 
 if not os.environ.get("GEMINI_API_KEY"):
     st.error("Missing Gemini API Key inside your .env file! Please add it to proceed")
     st.stop()
 
+MODEL_NAME = "ollama/qwen2.5:3b"
 
-sentimentalist_agent=Agent(
-    name="Sentimentalist",
-    instructions="""
-    You are an expert Wall Street financial news analyst and NLP specialist.
-    Your sole responsibility is to evaluate market news headlines or text snippets.
-    
-    1. Filter out emotional chatter and focus purely on macroeconomic impact or earnings facts.
-    2. Assess whether the incoming data string is overall Bullish, Bearish, or Neutral.
-    3. Keep your reasoning brief and focus on structural market factors.
-    """,
-    model=MODEL_NAME
-)
-
-@function_tool
 def calculate_momentum(prices_csv: str) -> str:
-    """
-    Calculates technical momentum markers from a comma-separated string of historical closing prices.
-    Use this tool whenever you need to find numerical trend directions for an asset. 
-    """
+    """Calculates technical momentum markers from historical closing prices."""
     try:
-        price_list=[float(p.strip()) for p in prices_csv.split(",") if p.strip()]
+        price_list = [float(p.strip()) for p in prices_csv.split(",") if p.strip()]
         df = pd.DataFrame(price_list, columns=["Close"])
 
-        if len(df)>=3:
-            velocity=df["Close"].iloc[-1] - df["Close"].iloc[-3]
+        if len(df) >= 3:
+            velocity = df["Close"].iloc[-1] - df["Close"].iloc[-3]
             direction = "UPWARD" if velocity > 0 else "DOWNWARD"
             return f"Calculated Trend: {direction} (Net Change over 3 intervals: {velocity:.2f})"
         else:
             return "Error: Insufficient data history provided to compute a trend velocity"
     except Exception as e:
         return f"Calculation execution failed due to error: {str(e)}"
+
+async def run_analysis_pipeline(news_input: str, price_input: str):
+    """Executes the multi-agent panel layers sequentially via LiteLLM."""
     
-quant_agent = Agent(
-    name="Quantative Analyst",
-    instructions="""
-    You are a high-frequency algorithmic quantitative trading analyst.
-    Your sole responsibility is to track technical indicators and asset trends.
+    # 1. Simulate Persona 1: The Sentimentalist
+    sent_prompt = f"You are an expert Wall Street news analyst. Analyze this news text and determine if it is strictly BULLISH, BEARISH, or NEUTRAL:\n{news_input}"
+    res_news = litellm.completion(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": sent_prompt}]
+    )
+    sentiment = res_news.choices[0].message.content
+
+    # 2. Simulate Persona 2: The Quantitative Analyst
+    math_analysis = calculate_momentum(price_input)
+
+    # 3. Simulate Persona 3: The Risk Officer (JSON Synthesis Output)
+    unified_prompt = f"""
+    Synthesize these financial findings into a valid structural JSON object layout.
+    [SENTIMENT FINDINGS]: {sentiment}
+    [QUANT MATHEMATICS]: {math_analysis}
+    """
     
-    1. You never guess asset trends. You must always run numerical calculations.
-    2. Use the 'calculate_momentum' tool to extract trend velocities from incoming price data streams.
-    3. State your final output clearly based entirely on the mathematical tool results.
-    """,
-    tools=[calculate_momentum],
-    model=MODEL_NAME
-)
-
-class RiskAssessmentReport(pydantic.BaseModel):
-    market_sentiment: str = pydantic.Field(description="Must be strictly: BULLISH, BEARISH or NEUTRAL.")
-    technical_trend: str = pydantic.Field(description="The asset movement velocity calculated by the quant.")
-    risk_level_score: int = pydantic.Field(description="A safety risk rating from 1 (Lowest Risk) to 5 (Extreme Risk).")
-    advisor_summary: str = pydantic.Field(description="A concise executive summary advising the trader on next steps.")
-
-risk_officer_agent = Agent(
-    name="Risk Officer",
-    instructions="""
-    You are the Chief Risk Officer and Managing Director of an elite digital hedge fund.
-    Your responsibility is to synthesize the findings from both the Sentimentalist and the Quantitative Analyst.
+    risk_instructions = """You are a Chief Risk Officer. Cross-examine news against technical calculations, calculate a risk rating from 1 to 5, and output a strict JSON object with keys: "market_sentiment", "technical_trend", "risk_level_score", and "advisor_summary". Do not wrap in markdown tags or include conversational text."""
     
-    1. Cross-examine the text sentiment analysis against the mathematical asset trends.
-    2. Assess hidden structural market vulnerabilities or contradictions (e.g., price going up but news is bad).
-    3. Generate a strict risk rating score between 1 and 5.
-    4. Compile your final answers exclusively into the required output schema.
-    """,
-    output_schema=RiskAssessmentReport,
-    model=MODEL_NAME
-)
+    res_risk = litellm.completion(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": risk_instructions},
+            {"role": "user", "content": unified_prompt}
+        ],
+        response_format={"type": "json_object"}
+    )
 
-def handoff_to_sentimentalist() -> Agent:
-    """Transfer control to the Sentimentalist Agent for reading news and analyzing text sentiment."""
-    return sentimentalist_agent
+    # Mock conversation object layout for Streamlit parser matching
+    class MockContext:
+        def __init__(self, text):
+            class MockMessage:
+                def __init__(self, txt):
+                    self.content = txt
+            self.messages = [MockMessage(txt=text)]
 
-def handoff_to_quant() -> Agent:
-    """Transfer control to the Quantative Analyst Agent for executing math trend calculations."""
-    return quant_agent
+    return MockContext(res_risk.choices[0].message.content)
 
-def handoff_to_risk_officer() -> Agent:
-    """Transfer control to the Chief Risk Officer to compile the final validated structured report."""
-    return risk_officer_agent
+# --- Streamlit Layout Display View Configuration ---
+st.set_page_config(page_title="AI Market Intelligence Panel", layout="wide")
+st.title("Autonomous Multi-Agent Market Intelligence Panel")
+st.subheader("Simulated Institutional Research Group & Risk Analytics")
+st.markdown("---")
 
-triage_agent = Agent(
-    name="Triage Router",
-    instructions="""
-    You are the central traffic controller and orchestrator for the financial panel.
-    Your sole task is to route incoming data streams to the appropriate specialist.
-    
-    1. If the user provides raw news text or headlines, hand off to the Sentimentalist.
-    2. If the user provides historical price matrices or digits, hand off to the Quantitative Analyst.
-    3. Once the specialists have added their findings to the context, route to the Risk Officer for final report generation.
-    """,
-    tools=[handoff_to_sentimentalist,handoff_to_quant,handoff_to_risk_officer],
-    model=MODEL_NAME
-)
+col1, col2 = st.columns(2)
+
+with col1:
+    st.header("News & Fundamentals Input")
+    news_area = st.text_area(
+        label="Paste recent market articles or headlines:",
+        value="Federal Reserve signals potential rate pauses. Consumer retail demand stays resilient but corporate manufacturing yields indicate minor supply bottlenecks.",
+        height=150
+    )
+with col2:
+    st.header("Technical Asset Price Matrix")
+    price_area = st.text_input(
+        label="Enter comma-separated historical closing prices (oldest to newest):",
+        value="150.25, 152.10, 151.80, 154.20, 155.60",
+    )
+
+analyze_btn = st.button("Execute Autonomous Multi-Agent Analysis Pipeline", use_container_width=True)
+
+if analyze_btn:
+    if not news_area.strip() or not price_area.strip():
+        st.warning("Please ensure both the news and price fields are not empty before analyzing")
+    else:
+        with st.spinner("The Multi-Agent Panel is collaborating and analyzing data"):
+            try:
+                final_context = asyncio.run(run_analysis_pipeline(news_area, price_area))
+                st.success("Multi-Agent Analysis Completed Successfully")
+                st.markdown("---")
+                final_message = final_context.messages[-1]
+
+                if hasattr(final_message, "content") and final_message.content:
+                    raw_text = final_message.content.replace("```json", "").replace("```", "").strip()
+                    report = json.loads(raw_text)
+                    
+                    m_col1, m_col2 = st.columns(2)
+                    with m_col1:
+                        st.metric("Market Sentiment", str(report.get("market_sentiment")).upper())
+                    with m_col2:
+                        st.metric("Risk Score Rating", f"{report.get('risk_level_score')} / 5")
+
+                    st.markdown("---")
+                    st.subheader("📈 Technical Momentum & Trend Status")
+                    st.success(report.get("technical_trend"))
+
+                    st.markdown("---")
+                    st.subheader("📋 Executive Advisor Summary Digest")
+                    st.info(report.get("advisor_summary"))
+                else:
+                    st.error("Failed to extract structured data report fields from the final agent response")
+
+            except Exception as system_err:
+                st.error(f"An execution crash occurred during the multi-agent pass: {str(system_err)}")
