@@ -31,6 +31,17 @@ def calculate_momentum(prices_csv: str) -> str:
         return f"Calculation execution failed due to error: {str(e)}"
 
 async def run_analysis_pipeline(news_input: str, price_input: str):
+
+        # Check if running on Streamlit Cloud or locally
+    IS_CLOUD = os.environ.get("STREAMLIT_RUNTIME_MOCK") is None and os.environ.get("HOSTNAME") is not None
+
+    if IS_CLOUD:
+        MODEL_NAME = "gemini/gemini-2.5-flash"
+        os.environ["GEMINI_API_KEY"] = os.environ.get("GEMINI_API_KEY", "")
+    else:
+        # local setup
+        MODEL_NAME = "ollama/qwen2.5:3b"
+
     """Executes the multi-agent panel layers sequentially via LiteLLM."""
     
     # 1. Simulate Persona 1: The Sentimentalist
